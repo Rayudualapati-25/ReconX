@@ -74,3 +74,112 @@ when later work proves them right or wrong.
 - **Why.** The runtime image carries no build tooling, and a compromised process does not run
   as root.
 - **With hindsight.** No change so far.
+
+## Matching
+
+### D8. Three passes, most certain first; each pass sees only the leftovers
+
+- **Decision.** Pass 1 pairs exact references through a hash map, pass 2 pairs equal amounts
+  within a date window by sorting and walking two pointers, and pass 3 pairs references a few
+  edits apart. Each pass takes only what the passes before it left, and every match records
+  the rule that made it.
+- **Alternative.** Score every candidate pair (reference similarity, amount, date gap) and
+  solve one global assignment, for example with the Hungarian algorithm.
+- **Why.** Most payments carry a usable reference, so the linear pass settles the bulk and the
+  costlier comparisons run on the few percent left. A rule name ("same reference") is easier
+  for a reviewer to check than a score of 0.83. A global assignment is O(n³), which rules it
+  out at 100,000 rows.
+- **With hindsight.** No change so far.
+
+### D9. A shared reference pairs two entries even when the amount or date disagrees
+
+- **Decision.** The same reference and amount is a match whatever the dates. The same
+  reference with a different amount is an amount-mismatch break that links both entries.
+  Equal amounts pair first, so a mismatch never takes the partner of an exact match. When a
+  reference repeats (a monthly subscription), each entry takes the nearest date.
+- **Alternative.** Require the date window for reference matches too, or leave
+  same-reference, different-amount entries to the later passes.
+- **Why.** A payment reference identifies a payment better than its date does: bookings can
+  lag the bank by weeks. Sending a short payment on to pass 2 would let another payment of
+  the same amount claim it, turning one explainable mismatch into two misleading breaks.
+- **With hindsight.** No change so far.
+
+### D10. Two different references are never paired on amount and date alone
+
+- **Decision.** Pass 2 pairs only where at least one side has no reference. Two entries that
+  both carry references, different ones, go to pass 3 (are they a typo apart?) or to a
+  person.
+- **Alternative.** Pair any equal amounts within the window, whatever the references say.
+- **Why.** In reconciliation a wrong automatic match costs more than an extra exception: it
+  hides a real break where nobody looks. Round amounts (rent, salaries, EMIs) repeat, so
+  "same amount, same week" is weak evidence once the references disagree. The break's reason
+  names the candidate on the other side, so a person can confirm it in seconds.
+- **With hindsight.** No change so far.
+
+### D11. Pass 2 pairs in date order within each amount
+
+- **Decision.** Both sides are sorted by (amount, date, file row) and walked with two
+  pointers; whichever entry is too early to pair is skipped.
+- **Alternative.** Nested loops that give each entry its closest date, or a minimum-cost
+  assignment.
+- **Why.** Among equal amounts, an entry too early for the current candidate is too early
+  for every later one, so skipping it loses nothing: one O(n log n) walk makes as many pairs
+  as the window allows. A property test checks that no two unmatched entries could have been
+  paired. Sorting on the file row as the last key makes every run repeatable.
+- **With hindsight.** Date order maximises the number of pairs, not their closeness: a bank
+  entry on day 3 pairs with a ledger entry on day 1 before one on day 3. Both candidates have
+  the same amount, so the books balance either way; only which of two identical-looking
+  entries is reported as missing changes.
+
+### D12. Fuzzy references: a bounded edit distance that scales with length
+
+- **Decision.** Two references are close when they are at most two edits apart and at most
+  one edit per five characters, counting an insertion, deletion, substitution or swap of
+  neighbouring characters as one edit (the optimal string alignment distance). The amount
+  must be equal and the dates within the window. Candidates are looked up by amount, and
+  the distance is computed only on a band around the diagonal, stopping as soon as a row
+  exceeds the limit: O(limit × length). A property test checks it against the full table.
+- **Alternative.** A similarity ratio from a library such as rapidfuzz, or plain Levenshtein
+  distance.
+- **Why.** A fixed limit treats "AB12" and "AB13", two different payments, like a typo in a
+  long reference; scaling by length requires short references to match exactly. A swapped
+  pair of digits is the commonest keying error, and Levenshtein would count it twice.
+  Requiring the amount and the window stops sequential invoice numbers a month apart from
+  matching. The function is 30 lines with no native dependency.
+- **With hindsight.** No change so far.
+
+### D13. A duplicate is an exact repeat on the same side
+
+- **Decision.** An unmatched entry identical to another entry on its own side (date, amount,
+  reference and description) is a duplicate of it: of the copy that was paired, or else of
+  the first copy, which is reported as missing. Copies present on both sides pair one to one.
+- **Alternative.** Flag any two entries with the same reference and amount within the window
+  as possible duplicates.
+- **Why.** A file loaded twice, or an entry posted twice, produces exact copies, and requiring
+  every field to agree keeps the label honest. Two genuine identical payments appear on both
+  sides and simply match.
+- **With hindsight.** A bank that re-presents a payment a day later produces a near-copy,
+  which is reported as missing rather than as a duplicate. It is still a break, but with a
+  less helpful label.
+
+### D14. The match rate counts entries on both sides
+
+- **Decision.** Match rate = 2 × matched pairs / (bank entries + ledger entries). Amount
+  mismatches pair two entries but count as breaks, not matches.
+- **Alternative.** Matched bank entries over bank entries.
+- **Why.** A ledger entry missing from the bank is as much a break as the reverse; a rate
+  over one side would hide it.
+- **With hindsight.** No change so far.
+
+### D15. The engine is pure functions over immutable values
+
+- **Decision.** `app/domain` has no database or HTTP code. Entries are frozen dataclasses and
+  `reconcile(bank, ledger, config)` returns the matches and breaks. Hypothesis checks three
+  invariants on generated files: every entry ends up in exactly one match or break, every
+  match has the evidence its rule names, and no two unmatched entries could have been paired.
+- **Alternative.** Match inside the service layer on ORM objects, or in SQL with joins.
+- **Why.** Pure code is unit-tested in milliseconds, and the same function serves the API,
+  the benchmark and the comparison with the naive matcher. The invariants have teeth: pass 2
+  without the reference guard, a pass that pairs nothing, a window off by one and a dropped
+  break each make one of them fail.
+- **With hindsight.** No change so far.
