@@ -116,20 +116,26 @@ when later work proves them right or wrong.
   names the candidate on the other side, so a person can confirm it in seconds.
 - **With hindsight.** No change so far.
 
-### D11. Pass 2 pairs in date order within each amount
+### D11. Pass 2 pairs only entries that are each other's only candidate
 
-- **Decision.** Both sides are sorted by (amount, date, file row) and walked with two
-  pointers; whichever entry is too early to pair is skipped.
-- **Alternative.** Nested loops that give each entry its closest date, or a minimum-cost
-  assignment.
-- **Why.** Among equal amounts, an entry too early for the current candidate is too early
-  for every later one, so skipping it loses nothing: one O(n log n) walk makes as many pairs
-  as the window allows. A property test checks that no two unmatched entries could have been
-  paired. Sorting on the file row as the last key makes every run repeatable.
-- **With hindsight.** Date order maximises the number of pairs, not their closeness: a bank
-  entry on day 3 pairs with a ledger entry on day 1 before one on day 3. Both candidates have
-  the same amount, so the books balance either way; only which of two identical-looking
-  entries is reported as missing changes.
+- **Decision.** A bank and a ledger entry pair on amount and date only when each is the
+  other's only candidate: the same amount, dates within the window, and at least one of them
+  without a reference. When several entries could pair, none is paired, and each becomes a
+  break whose reason names the candidates. Both sides are sorted by (amount, date) and two
+  pointers mark each entry's window, with prefix counts of unreferenced entries, so one linear
+  walk after the sort counts every entry's candidates.
+- **Alternative.** Pair greedily in date order within each amount, which pairs as many
+  entries as the window allows.
+- **Why.** Among equal amounts in the same week (rent, salaries, EMIs) there is nothing to
+  choose between candidates, so a greedy pairing is a guess. On 100,000 synthetic transactions
+  with known answers, greedy pairing made 559 wrong matches (99.39% precision), all on round
+  amounts; pairing only sole candidates made none (100%), and recall rose from 99.17% to
+  99.32% because the wrong pairs had been taking the partners of right ones. The match rate
+  fell from 94.21% to 93.77%. Being a candidate is symmetric, so removing such a pair changes
+  no other entry's candidates: one walk finds them all and the pass stays O(n log n).
+- **With hindsight.** The first version paired greedily. Measuring precision against known
+  answers, not just the match rate, is what showed the cost, and a property test now checks
+  the walk against a brute-force count of candidates.
 
 ### D12. Fuzzy references: a bounded edit distance that scales with length
 

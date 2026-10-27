@@ -3,12 +3,19 @@
 Dates are days in October 2026 (see tests/entries.py). The default window is 3 days.
 """
 
+import datetime as dt
 from decimal import Decimal
 
 import pytest
 
 from app.domain.breaks import BreakType
-from app.domain.matching import MatchConfig, Rule, reference_distance, sweep
+from app.domain.matching import (
+    MatchConfig,
+    Rule,
+    amount_date_row,
+    only_candidates,
+    reference_distance,
+)
 from app.domain.reconcile import Reconciliation, reconcile
 from tests.entries import bank, ledger
 
@@ -134,24 +141,63 @@ def test_two_different_references_never_pair_on_amount_alone() -> None:
     )
 
 
-def test_amount_and_date_pair_as_many_entries_as_the_window_allows() -> None:
-    # Only day 1 with day 4 and day 5 with day 8 pairs all four.
+def test_an_entry_with_two_candidates_is_left_for_a_person() -> None:
+    # Either ledger row could be this payment; guessing is how wrong matches happen.
+    result = reconcile(
+        [bank(1, "25000.00", 5)], [ledger(1, "25000.00", 4), ledger(2, "25000.00", 6)]
+    )
+
+    assert result.matches == ()
+    assert result.breaks[0].reason == (
+        "Ledger rows 1, 2 have the same amount within 3 days, but more than one entry could "
+        "pair, so none was paired automatically."
+    )
+
+
+def test_a_candidate_shared_with_another_entry_is_not_paired() -> None:
+    # Bank row 1 sees only ledger row 1, but ledger row 1 also sees bank row 2.
     result = reconcile(
         [bank(1, "100.00", 1), bank(2, "100.00", 5)],
         [ledger(1, "100.00", 4), ledger(2, "100.00", 8)],
     )
 
-    assert matched(result) == [(1, 1, Rule.AMOUNT_DATE), (2, 2, Rule.AMOUNT_DATE)]
-
-
-def test_the_sweep_walks_mixed_amounts_in_one_pass() -> None:
-    pairs = sweep(
-        [bank(1, "300.00", 1), bank(2, "100.00", 9), bank(3, "200.00", 1)],
-        [ledger(1, "200.00", 2), ledger(2, "100.00", 1), ledger(3, "300.00", 30)],
-        window_days=3,
+    assert result.matches == ()
+    assert result.breaks[0].reason == (
+        "Ledger row 1 has the same amount within 3 days, but more than one entry could pair, "
+        "so none was paired automatically."
     )
 
-    assert [(b.row, g.row) for b, g in pairs] == [(3, 1)]
+
+def test_pairs_are_found_among_many_amounts_in_one_walk() -> None:
+    result = reconcile(
+        [bank(1, "300.00", 1, "UTR1"), bank(2, "100.00", 9), bank(3, "200.00", 1)],
+        [ledger(1, "200.00", 2), ledger(2, "100.00", 1), ledger(3, "300.00", 3)],
+    )
+
+    # Pairs come out in (amount, date) order: 200.00 before 300.00.
+    assert matched(result) == [(3, 1, Rule.AMOUNT_DATE), (1, 3, Rule.AMOUNT_DATE)]
+
+
+def test_only_candidates_counts_unreferenced_entries_for_a_referenced_one() -> None:
+    entries = sorted(
+        [bank(1, "100.00", 9), bank(2, "200.00", 1), bank(3, "300.00", 1, "UTR1")],
+        key=amount_date_row,
+    )
+    others = sorted(
+        [
+            ledger(1, "100.00", 1),
+            ledger(2, "200.00", 2),
+            ledger(3, "200.00", 3),
+            ledger(4, "300.00", 2, "INV9"),
+            ledger(5, "300.00", 3),
+        ],
+        key=amount_date_row,
+    )
+
+    choices = only_candidates(entries, others, dt.timedelta(days=3))
+
+    # None within the window; two candidates; one unreferenced candidate beside a referenced one.
+    assert [None if index is None else others[index].row for index in choices] == [None, None, 5]
 
 
 # Pass 3: fuzzy reference

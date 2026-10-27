@@ -11,7 +11,13 @@ from hypothesis import strategies as st
 
 from app.domain.breaks import BreakType
 from app.domain.entries import Entry
-from app.domain.matching import MatchConfig, Rule, days_apart, reference_distance
+from app.domain.matching import (
+    MatchConfig,
+    Rule,
+    amount_date_pass,
+    days_apart,
+    reference_distance,
+)
 from app.domain.reconcile import reconcile
 from tests.entries import bank, ledger
 
@@ -86,6 +92,33 @@ def test_no_two_unmatched_entries_have_the_evidence_for_a_match(
             assert not (b.reference and b.reference == g.reference), "pass 1 missed a pair"
             if b.amount != g.amount or days_apart(b, g) > CONFIG.date_window_days:
                 continue
-            assert b.reference and g.reference, "pass 2 missed a pair"
-            edits = reference_distance(b.reference, g.reference, CONFIG.max_edits)
-            assert edits is None, "pass 3 missed a pair"
+            if b.reference and g.reference:
+                edits = reference_distance(b.reference, g.reference, CONFIG.max_edits)
+                assert edits is None, "pass 3 missed a pair"
+
+
+def candidates(entry: Entry, others: list[Entry]) -> list[Entry]:
+    """Pass 2's candidates by brute force: an independent check of the two-pointer walk."""
+    return [
+        other
+        for other in others
+        if other.amount == entry.amount
+        and days_apart(entry, other) <= CONFIG.date_window_days
+        and not (entry.reference and other.reference)
+    ]
+
+
+@settings(max_examples=300)
+@given(entry_lists(bank), entry_lists(ledger))
+def test_pass_two_pairs_exactly_the_entries_that_are_each_others_only_candidate(
+    bank_entries: list[Entry], ledger_entries: list[Entry]
+) -> None:
+    result = amount_date_pass(bank_entries, ledger_entries, CONFIG.date_window_days)
+
+    for b, g in result.pairs:
+        assert candidates(b, ledger_entries) == [g]
+        assert candidates(g, bank_entries) == [b]
+    for b in result.bank:
+        only = candidates(b, list(result.ledger))
+        if len(only) == 1:
+            assert candidates(only[0], list(result.bank)) != [b], "pass 2 missed a pair"

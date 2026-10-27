@@ -3,8 +3,10 @@
 1. Exact reference, O(n): hash maps from reference to ledger entries. The same reference and
    amount is a match; the same reference with a different amount is an amount mismatch.
 2. Amount and date window, O(n log n): both sides sorted by (amount, date) and walked with two
-   pointers. Only entries that lack a reference are paired this way: two different references
-   are evidence against a match, so pass 3 decides whether they are close enough.
+   pointers. A bank and a ledger entry pair when each is the other's only candidate: the same
+   amount, dates within the window, and at least one of them without a reference. Two
+   different references are evidence against a match, so pass 3 decides whether they are close
+   enough; several candidates are a guess, so a person decides.
 3. Fuzzy reference: references a few edits apart, with equal amounts and dates in the window.
    Candidates are looked up by amount, and the pass runs on the leftovers only, so the edit
    distance is computed for a handful of pairs rather than every pair.
@@ -19,6 +21,7 @@ from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from itertools import accumulate
 from typing import TypeVar
 
 from app.domain.edit_distance import edit_distance_within
@@ -118,45 +121,66 @@ def reference(entry: Entry) -> str:
     return entry.reference
 
 
-def sweep(bank: Iterable[Entry], ledger: Iterable[Entry], window_days: int) -> list[Pair]:
-    """Pair entries with equal amounts whose dates are at most `window_days` apart.
+def amount_date_row(entry: Entry) -> tuple[Decimal, dt.date, int]:
+    return entry.amount, entry.date, entry.row
 
-    Both sides are sorted by (amount, date, row) and walked with two pointers: O(n log n) for
-    the sorts, O(n) for the walk. Within one amount, pairing in date order makes as many pairs
-    as possible: an entry skipped as too early can never fall in the window of a later one.
+
+def only_candidates(
+    entries: Sequence[Entry], others: Sequence[Entry], window: dt.timedelta
+) -> list[int | None]:
+    """For each entry, the index of its only candidate in `others`; None for none or several.
+
+    A candidate has the same amount, a date within the window, and no reference if the entry
+    has one. Both lists must be sorted by (amount, date, row). Two pointers mark the window's
+    ends in `others`; both only move forward as the entries ascend, so the walk is linear.
+    Prefix counts of unreferenced entries count a referenced entry's candidates in O(1).
     """
-    window = dt.timedelta(days=window_days)
-    bank_sorted = sorted(bank, key=lambda e: (e.amount, e.date, e.row))
-    ledger_sorted = sorted(ledger, key=lambda e: (e.amount, e.date, e.row))
-    pairs: list[Pair] = []
-    i = j = 0
-    while i < len(bank_sorted) and j < len(ledger_sorted):
-        b, g = bank_sorted[i], ledger_sorted[j]
-        if b.amount < g.amount or (b.amount == g.amount and b.date < g.date - window):
-            i += 1
-        elif b.amount > g.amount or g.date < b.date - window:
-            j += 1
+    unreferenced_before = list(accumulate((not other.reference for other in others), initial=0))
+    next_unreferenced = [len(others)] * (len(others) + 1)
+    for index in range(len(others) - 1, -1, -1):
+        next_unreferenced[index] = (
+            index if not others[index].reference else next_unreferenced[index + 1]
+        )
+    choices: list[int | None] = []
+    low = high = 0
+    for entry in entries:
+        earliest, latest = (entry.amount, entry.date - window), (entry.amount, entry.date + window)
+        while low < len(others) and (others[low].amount, others[low].date) < earliest:
+            low += 1
+        high = max(high, low)
+        while high < len(others) and (others[high].amount, others[high].date) <= latest:
+            high += 1
+        if entry.reference:
+            count = unreferenced_before[high] - unreferenced_before[low]
+            first = next_unreferenced[low]
         else:
-            pairs.append((b, g))
-            i += 1
-            j += 1
-    return pairs
+            count, first = high - low, low
+        choices.append(first if count == 1 else None)
+    return choices
 
 
 def amount_date_pass(
     bank: Sequence[Entry], ledger: Sequence[Entry], window_days: int
 ) -> PassResult:
-    """Pass 2: pair by amount and date window wherever at least one side has no reference."""
-    unreferenced_bank = sweep((e for e in bank if not e.reference), ledger, window_days)
-    ledger_left = without(ledger, (pair[1] for pair in unreferenced_bank))
-    unreferenced_ledger = sweep(
-        (e for e in bank if e.reference), (e for e in ledger_left if not e.reference), window_days
-    )
-    pairs = unreferenced_bank + unreferenced_ledger
+    """Pass 2: pair a bank and a ledger entry that are each other's only candidate.
+
+    Being a candidate is symmetric, so no other entry counted either of a pair among its own
+    candidates: pairing them changes nobody else's count, and one walk finds every such pair.
+    """
+    window = dt.timedelta(days=window_days)
+    bank_sorted = sorted(bank, key=amount_date_row)
+    ledger_sorted = sorted(ledger, key=amount_date_row)
+    bank_choice = only_candidates(bank_sorted, ledger_sorted, window)
+    ledger_choice = only_candidates(ledger_sorted, bank_sorted, window)
+    pairs = [
+        (bank_sorted[i], ledger_sorted[j])
+        for i, j in enumerate(bank_choice)
+        if j is not None and ledger_choice[j] == i
+    ]
     return PassResult(
         tuple(pairs),
         without(bank, (pair[0] for pair in pairs)),
-        without(ledger_left, (pair[1] for pair in unreferenced_ledger)),
+        without(ledger, (pair[1] for pair in pairs)),
     )
 
 
