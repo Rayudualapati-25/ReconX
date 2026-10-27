@@ -17,11 +17,13 @@ In progress. This README is the build plan; items are ticked as they land.
 
 - [ ] CSV ingest for the bank statement and the ledger into PostgreSQL,
       normalising amounts (`Decimal`), dates and references
-- [ ] Pass 1: exact reference match with a hash map, O(n)
-- [ ] Pass 2: amount and date-window match with sorted two pointers,
+- [x] Pass 1: exact reference match with a hash map, O(n)
+- [x] Pass 2: amount and date-window match with sorted two pointers,
       O(n log n)
-- [ ] Pass 3: fuzzy reference match (edit distance) on the leftovers only
-- [ ] Break types with a reason for each: missing in bank, missing in ledger,
+- [x] Pass 3: fuzzy reference match (edit distance) on the leftovers only
+      (it runs before pass 2: a similar reference is stronger evidence than a
+      shared amount, see DECISIONS D10)
+- [x] Break types with a reason for each: missing in bank, missing in ledger,
       amount mismatch, duplicate
 - [ ] REST API: upload both files, run a reconciliation, list and resolve
       breaks
