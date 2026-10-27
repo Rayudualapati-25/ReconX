@@ -1,5 +1,7 @@
 # ReconX
 
+[![CI](https://github.com/Rayudualapati-25/ReconX/actions/workflows/ci.yml/badge.svg)](https://github.com/Rayudualapati-25/ReconX/actions/workflows/ci.yml)
+
 A payment reconciliation engine. It matches a bank statement against an
 internal ledger, flags every break (missing, duplicate or mismatched
 payments) and shows the match rate on a dashboard.
@@ -36,6 +38,23 @@ In progress. This README is the build plan; items are ticked as they land.
 
 Python 3.11+ · FastAPI · PostgreSQL 16 · SQLAlchemy 2 · pandas · React ·
 TypeScript · pytest · Docker Compose · GitHub Actions
+
+## Development
+
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/) and PostgreSQL 16 for the tests.
+
+```bash
+uv sync                                   # virtualenv with runtime and dev dependencies
+docker run -d --name reconx-test-db -p 5432:5432 \
+  -e POSTGRES_USER=reconx -e POSTGRES_PASSWORD=reconx \
+  -e POSTGRES_DB=reconx_test postgres:16-alpine
+uv run pytest --cov                       # tests with branch coverage (80% floor)
+uv run ruff check . && uv run ruff format --check . && uv run mypy
+docker compose up --build                 # the API on http://localhost:8000
+```
+
+The tests use `TEST_DATABASE_URL` (see `.env.example`) and default to the container above.
+Design choices and their trade-offs are recorded in [DECISIONS.md](DECISIONS.md).
 
 ## Done when
 
