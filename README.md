@@ -21,6 +21,8 @@ In progress. This README is the build plan; items are ticked as they land.
 - [x] Pass 2: amount and date-window match with sorted two pointers,
       O(n log n)
 - [x] Pass 3: fuzzy reference match (edit distance) on the leftovers only
+      (it runs before pass 2: a similar reference is stronger evidence than a
+      shared amount, see DECISIONS D10)
 - [x] Break types with a reason for each: missing in bank, missing in ledger,
       amount mismatch, duplicate
 - [ ] REST API: upload both files, run a reconciliation, list and resolve

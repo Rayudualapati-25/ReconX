@@ -4,6 +4,7 @@ The values are drawn from small pools so that collisions are common: equal amoun
 dates, references one edit apart, exact repeats. That is where matching goes wrong.
 """
 
+import random
 from collections.abc import Callable
 
 from hypothesis import given, settings
@@ -16,9 +17,10 @@ from app.domain.matching import (
     Rule,
     amount_date_pass,
     days_apart,
+    nearest_first,
     reference_distance,
 )
-from app.domain.reconcile import reconcile
+from app.domain.reconcile import Reconciliation, reconcile
 from tests.entries import bank, ledger
 
 CONFIG = MatchConfig()
@@ -49,6 +51,29 @@ def test_every_entry_ends_up_in_exactly_one_match_or_break(
     ]
     assert sorted(bank_seen) == sorted(entry.id for entry in bank_entries)
     assert sorted(ledger_seen) == sorted(entry.id for entry in ledger_entries)
+
+
+@settings(max_examples=300)
+@given(entry_lists(bank), entry_lists(ledger), st.randoms(use_true_random=False))
+def test_the_order_entries_arrive_in_does_not_change_the_result(
+    bank_entries: list[Entry], ledger_entries: list[Entry], shuffler: random.Random
+) -> None:
+    def outcome(result: Reconciliation) -> tuple[list[tuple[object, ...]], ...]:
+        return (
+            sorted((m.rule, m.bank.row, m.ledger.row) for m in result.matches),
+            sorted(
+                (b.type, b.bank.row if b.bank else 0, b.ledger.row if b.ledger else 0, b.reason)
+                for b in result.breaks
+            ),
+        )
+
+    shuffled_bank, shuffled_ledger = list(bank_entries), list(ledger_entries)
+    shuffler.shuffle(shuffled_bank)
+    shuffler.shuffle(shuffled_ledger)
+
+    assert outcome(reconcile(shuffled_bank, shuffled_ledger)) == outcome(
+        reconcile(bank_entries, ledger_entries)
+    )
 
 
 @settings(max_examples=300)
@@ -122,3 +147,25 @@ def test_pass_two_pairs_exactly_the_entries_that_are_each_others_only_candidate(
         only = candidates(b, list(result.ledger))
         if len(only) == 1:
             assert candidates(only[0], list(result.bank)) != [b], "pass 2 missed a pair"
+
+
+@settings(max_examples=500)
+@given(entry_lists(bank), entry_lists(ledger))
+def test_nearest_first_always_takes_the_nearest_remaining_pair(
+    bank_entries: list[Entry], ledger_entries: list[Entry]
+) -> None:
+    # Brute force: repeatedly take the pair with the fewest days apart, then the earliest rows.
+    expected = []
+    bank_left, ledger_left = list(bank_entries), list(ledger_entries)
+    while bank_left and ledger_left:
+        b, g = min(
+            ((b, g) for b in bank_left for g in ledger_left),
+            key=lambda pair: (days_apart(*pair), pair[0].row, pair[1].row),
+        )
+        expected.append((b.row, g.row))
+        bank_left.remove(b)
+        ledger_left.remove(g)
+
+    pairs = nearest_first(bank_entries, ledger_entries)
+
+    assert sorted((b.row, g.row) for b, g in pairs) == sorted(expected)

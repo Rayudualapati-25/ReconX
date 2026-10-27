@@ -1,13 +1,16 @@
 """Breaks: what could not be matched, and why, in words a reviewer can act on."""
 
 import datetime as dt
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
 from app.domain.entries import Entry, Side
-from app.domain.matching import days_apart, group_by
+from app.domain.matching import group_by
+
+SHOWN_CANDIDATES = 5
 
 
 class BreakType(StrEnum):
@@ -36,6 +39,10 @@ def money(amount: Decimal) -> str:
     return f"{amount:,.2f}"
 
 
+def days(count: int) -> str:
+    return f"{count} day" if count == 1 else f"{count} days"
+
+
 def _on_side(side: Side, entry: Entry) -> dict[str, Entry]:
     return {side.value: entry}
 
@@ -57,45 +64,72 @@ def _duplicate_key(entry: Entry) -> tuple[dt.date, Decimal, str, str]:
     return entry.date, entry.amount, entry.reference, entry.description
 
 
-def _original(entry: Entry, twins: list[Entry], unmatched_ids: set[int]) -> Entry | None:
-    """The entry that `entry` repeats: a twin that was paired, else the first twin, or None."""
-    paired = next((twin for twin in twins if twin.id not in unmatched_ids), None)
-    if paired is not None:
-        return paired
-    return twins[0] if twins[0].id != entry.id else None
+class _Nearby:
+    """The other side's unmatched entries by amount, in date order, for explaining a break."""
 
+    def __init__(self, entries: Sequence[Entry]) -> None:
+        ordered = sorted(entries, key=lambda entry: (entry.date, entry.row))
+        self._groups = group_by(ordered, lambda entry: entry.amount)
+        self._dates = {amount: [e.date for e in group] for amount, group in self._groups.items()}
 
-def _near_reason(other: Side, entry: Entry, near: list[Entry], window_days: int) -> str:
-    """Why an entry with same-amount entries nearby was still not paired automatically."""
-    shown = sorted(near, key=lambda candidate: (days_apart(candidate, entry), candidate.row))[:5]
-    rows = ", ".join(str(candidate.row) for candidate in shown)
-    if len(near) == 1 and entry.reference and near[0].reference:
-        return (
-            f"{other.value.capitalize()} row {rows} has the same amount within {window_days} "
-            f"days, but a different reference ({near[0].reference}), so it was not paired "
-            "automatically."
+    def around(self, entry: Entry, window_days: int) -> tuple[int, list[Entry]]:
+        """How many have the entry's amount within the window, and the nearest few of them.
+
+        Bisection finds the window and the walk outwards stops after a few entries, so a
+        statement with thousands of identical amounts still explains each break in O(log n).
+        """
+        group = self._groups.get(entry.amount, [])
+        dates = self._dates.get(entry.amount, [])
+        window = dt.timedelta(days=window_days)
+        low, high = (
+            bisect_left(dates, entry.date - window),
+            bisect_right(dates, entry.date + window),
         )
-    which = f"row {rows} has" if len(near) == 1 else f"rows {rows}{', …' * (len(near) > 5)} have"
+        left = bisect_left(dates, entry.date, low, high) - 1
+        right = left + 1
+        nearest: list[Entry] = []
+        while len(nearest) < SHOWN_CANDIDATES and (left >= low or right < high):
+            if right >= high or (
+                left >= low and entry.date - dates[left] <= dates[right] - entry.date
+            ):
+                nearest.append(group[left])
+                left -= 1
+            else:
+                nearest.append(group[right])
+                right += 1
+        return high - low, sorted(nearest, key=lambda candidate: candidate.row)
+
+
+def _near_reason(other: Side, entry: Entry, count: int, near: list[Entry], window: int) -> str:
+    """Why an entry with same-amount entries nearby was still not paired automatically."""
+    side = other.value.capitalize()
+    rows = ", ".join(str(candidate.row) for candidate in near)
+    if count == 1 and entry.reference and near[0].reference:
+        return (
+            f"{side} row {rows} has the same amount within {days(window)}, but a different "
+            f"reference ({near[0].reference}), so it was not paired automatically."
+        )
+    which = f"row {rows} has" if count == 1 else f"rows {rows}{', …' * (count > len(near))} have"
     return (
-        f"{other.value.capitalize()} {which} the same amount within {window_days} days, but more "
-        "than one entry could pair, so none was paired automatically."
+        f"{side} {which} the same amount within {days(window)}, but more than one entry could "
+        "pair, so none was paired automatically."
     )
 
 
-def _missing(side: Side, entry: Entry, same_amount: list[Entry], window_days: int) -> Break:
+def _missing(side: Side, entry: Entry, nearby: _Nearby, window_days: int) -> Break:
     other = side.other
-    near = [candidate for candidate in same_amount if days_apart(candidate, entry) <= window_days]
-    if near:
-        reason = _near_reason(other, entry, near, window_days)
+    count, near = nearby.around(entry, window_days)
+    if count:
+        reason = _near_reason(other, entry, count, near, window_days)
     elif entry.reference:
         reason = (
             f"No unmatched {other.value} entry has reference {entry.reference}, or amount "
-            f"{money(entry.amount)} within {window_days} days of {entry.date.isoformat()}."
+            f"{money(entry.amount)} within {days(window_days)} of {entry.date.isoformat()}."
         )
     else:
         reason = (
             f"No reference, and no unmatched {other.value} entry has amount "
-            f"{money(entry.amount)} within {window_days} days of {entry.date.isoformat()}."
+            f"{money(entry.amount)} within {days(window_days)} of {entry.date.isoformat()}."
         )
     kind = BreakType.MISSING_IN_LEDGER if side is Side.BANK else BreakType.MISSING_IN_BANK
     return Break(kind, reason, **_on_side(side, entry))
@@ -111,16 +145,20 @@ def unmatched_breaks(
     """A break for every unmatched entry on one side.
 
     An entry that exactly repeats another on its own side (same date, amount, reference and
-    description) is a duplicate of it; any other unmatched entry is missing on the other side.
+    description) is a duplicate of it: of the copy that was paired, or else of the first copy,
+    which is reported as missing. Any other unmatched entry is missing on the other side.
     """
-    twins = group_by(entries, _duplicate_key)
     unmatched_ids = {entry.id for entry in unmatched}
-    by_amount = group_by(other_unmatched, lambda entry: entry.amount)
+    originals = {
+        key: next((twin for twin in twins if twin.id not in unmatched_ids), twins[0])
+        for key, twins in group_by(entries, _duplicate_key).items()
+    }
+    nearby = _Nearby(other_unmatched)
     breaks: list[Break] = []
     for entry in unmatched:
-        original = _original(entry, twins[_duplicate_key(entry)], unmatched_ids)
-        if original is None:
-            breaks.append(_missing(side, entry, by_amount.get(entry.amount, []), window_days))
+        original = originals[_duplicate_key(entry)]
+        if original.id == entry.id:
+            breaks.append(_missing(side, entry, nearby, window_days))
         else:
             reason = (
                 f"Repeats {side.value} row {original.row}: same date, amount, reference and "

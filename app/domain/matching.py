@@ -1,22 +1,28 @@
-"""The matching passes. Each pass sees only what the passes before it left unmatched.
+"""The matching passes, run from the strongest evidence to the weakest.
 
-1. Exact reference, O(n): hash maps from reference to ledger entries. The same reference and
+Each pass sees only what the passes before it left unmatched:
+
+1. Exact reference, O(n): entries grouped by reference in hash maps. The same reference and
    amount is a match; the same reference with a different amount is an amount mismatch.
-2. Amount and date window, O(n log n): both sides sorted by (amount, date) and walked with two
+   Within a group, the nearest dates pair first.
+2. Fuzzy reference, on the leftovers only: references a few edits apart, with equal amounts
+   and dates within the window. Candidates are looked up by amount and date, so the edit
+   distance runs on a handful of pairs, and the best pairs (fewest edits, nearest dates) go
+   first. A similar reference is stronger evidence than a shared amount, so this runs before
+   the amount pass and a blank reference cannot take a typo's partner (DECISIONS D10).
+3. Amount and date window, O(n log n): both sides sorted by (amount, date) and walked with two
    pointers. A bank and a ledger entry pair when each is the other's only candidate: the same
-   amount, dates within the window, and at least one of them without a reference. Two
-   different references are evidence against a match, so pass 3 decides whether they are close
-   enough; several candidates are a guess, so a person decides.
-3. Fuzzy reference: references a few edits apart, with equal amounts and dates in the window.
-   Candidates are looked up by amount, and the pass runs on the leftovers only, so the edit
-   distance is computed for a handful of pairs rather than every pair.
+   amount, dates within the window, and at least one of them without a reference. Several
+   candidates are a guess, so a person decides.
 
 Ties are broken by date distance and then by file row, so the same files always reconcile the
 same way.
 """
 
 import datetime as dt
-from collections import defaultdict
+import heapq
+from bisect import bisect_left, bisect_right
+from collections import defaultdict, deque
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -30,13 +36,20 @@ from app.domain.entries import Entry
 Key = TypeVar("Key", bound=Hashable)
 Pair = tuple[Entry, Entry]
 
+MAX_WINDOW_DAYS = 365
+MAX_EDITS = 5
+# A reference with more same-amount lookalikes than this in its window is too ambiguous to
+# fuzzy-match, and comparing it with all of them could let one crafted file pin a worker.
+MAX_FUZZY_CANDIDATES = 100
+BANK, LEDGER = 0, 1  # sides, as sort keys
+
 
 class Rule(StrEnum):
     """Which pass matched a pair: the evidence a reviewer sees next to each match."""
 
     EXACT_REFERENCE = "exact_reference"
-    AMOUNT_DATE = "amount_date"
     FUZZY_REFERENCE = "fuzzy_reference"
+    AMOUNT_DATE = "amount_date"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +60,10 @@ class MatchConfig:
     max_edits: int = 2
 
     def __post_init__(self) -> None:
-        if self.date_window_days < 0:
-            raise ValueError("date_window_days must not be negative")
-        if self.max_edits < 0:
-            raise ValueError("max_edits must not be negative")
+        if not 0 <= self.date_window_days <= MAX_WINDOW_DAYS:
+            raise ValueError(f"date_window_days must be between 0 and {MAX_WINDOW_DAYS}")
+        if not 0 <= self.max_edits <= MAX_EDITS:
+            raise ValueError(f"max_edits must be between 0 and {MAX_EDITS}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,30 +100,86 @@ def without(entries: Iterable[Entry], taken: Iterable[Entry]) -> tuple[Entry, ..
     return tuple(entry for entry in entries if entry.id not in taken_ids)
 
 
-def _take_nearest(candidates: list[Entry], entry: Entry) -> Entry:
-    """Remove and return the candidate nearest in date; the earliest row wins a tie."""
-    best = min(range(len(candidates)), key=lambda i: (days_apart(candidates[i], entry), i))
-    return candidates.pop(best)
+def _result(bank: Sequence[Entry], ledger: Sequence[Entry], pairs: list[Pair]) -> PassResult:
+    return PassResult(
+        tuple(pairs),
+        without(bank, (pair[0] for pair in pairs)),
+        without(ledger, (pair[1] for pair in pairs)),
+    )
+
+
+def nearest_first(bank: Sequence[Entry], ledger: Sequence[Entry]) -> list[Pair]:
+    """Pair two groups of entries nearest dates first; ties go to the earliest rows.
+
+    Entries are bucketed by (date, side), each bucket a queue in row order, and the buckets are
+    lined up by date. The nearest remaining bank-ledger pair always sits in neighbouring
+    buckets, because a bucket between them would hold an entry strictly nearer to one of them.
+    A heap of neighbouring bank-ledger buckets therefore yields each next pair in O(log n); a
+    bucket that empties is unlinked, which can make two others neighbours.
+    """
+    if len(bank) == 1 and len(ledger) == 1:  # a unique reference: the usual case
+        return [(bank[0], ledger[0])]
+    buckets: dict[tuple[dt.date, int], list[Entry]] = defaultdict(list)
+    for side, entries in ((BANK, bank), (LEDGER, ledger)):
+        for entry in sorted(entries, key=lambda e: e.row):
+            buckets[(entry.date, side)].append(entry)
+    keys = sorted(buckets)  # by date; on one day the bank bucket comes first
+    queues = [deque(buckets[key]) for key in keys]
+    count = len(keys)
+    before, after = list(range(-1, count - 1)), list(range(1, count + 1))
+    heap: list[tuple[int, int, int, int, int]] = []
+
+    def offer(i: int, j: int) -> None:
+        """Queue neighbouring buckets i < j as a candidate, keyed by gap and head rows."""
+        if i < 0 or j >= count or keys[i][1] == keys[j][1] or not (queues[i] and queues[j]):
+            return
+        b, g = (i, j) if keys[i][1] == BANK else (j, i)
+        gap = (keys[j][0] - keys[i][0]).days
+        heapq.heappush(heap, (gap, queues[b][0].row, queues[g][0].row, i, j))
+
+    def unlink(k: int) -> None:
+        if before[k] >= 0:
+            after[before[k]] = after[k]
+        if after[k] < count:
+            before[after[k]] = before[k]
+        offer(before[k], after[k])
+
+    for index in range(count - 1):
+        offer(index, index + 1)
+    pairs: list[Pair] = []
+    while heap:
+        _, bank_row, ledger_row, i, j = heapq.heappop(heap)
+        if after[i] != j or not (queues[i] and queues[j]):
+            continue  # no longer neighbours, or one has emptied since this was queued
+        b, g = (i, j) if keys[i][1] == BANK else (j, i)
+        if (queues[b][0].row, queues[g][0].row) != (bank_row, ledger_row):
+            offer(i, j)  # the heads moved on: queue the pair again with its current heads
+            continue
+        pairs.append((queues[b].popleft(), queues[g].popleft()))
+        for k in (i, j):
+            if not queues[k]:
+                unlink(k)
+        offer(i, j)
+    return pairs
 
 
 def pair_by_key(
     bank: Sequence[Entry], ledger: Sequence[Entry], key: Callable[[Entry], Hashable]
 ) -> PassResult:
-    """Pair each bank entry with the ledger entry that shares its key and is nearest in date.
+    """Pair bank and ledger entries that share a key, nearest dates first within each key.
 
-    Entries without a reference are never paired here. Building the index and probing it are
-    both linear, so this is O(n + m) when keys are close to unique, as payment references are.
+    Entries without a reference are never paired here. Grouping is a hash map per side, so
+    this is O(n) when keys are close to unique, as payment references are, and O(n log n)
+    however much they repeat.
     """
-    index = group_by((entry for entry in ledger if entry.reference), key)
+    bank_groups = group_by((entry for entry in bank if entry.reference), key)
+    ledger_groups = group_by((entry for entry in ledger if entry.reference), key)
     pairs: list[Pair] = []
-    left: list[Entry] = []
-    for entry in bank:
-        candidates = index.get(key(entry)) if entry.reference else None
-        if candidates:
-            pairs.append((entry, _take_nearest(candidates, entry)))
-        else:
-            left.append(entry)
-    return PassResult(tuple(pairs), tuple(left), without(ledger, (pair[1] for pair in pairs)))
+    for group_key, bank_group in bank_groups.items():
+        ledger_group = ledger_groups.get(group_key)
+        if ledger_group:
+            pairs += nearest_first(bank_group, ledger_group)
+    return _result(bank, ledger, pairs)
 
 
 def reference_and_amount(entry: Entry) -> tuple[str, Decimal]:
@@ -119,6 +188,55 @@ def reference_and_amount(entry: Entry) -> tuple[str, Decimal]:
 
 def reference(entry: Entry) -> str:
     return entry.reference
+
+
+def reference_distance(a: str, b: str, max_edits: int) -> int | None:
+    """Edits between two references, if they are close enough to be the same payment.
+
+    At most `max_edits`, and at most one edit per five characters of the shorter reference, so
+    short references must match exactly: "AB12" and "AB13" are different payments.
+    """
+    limit = min(max_edits, min(len(a), len(b)) // 5)
+    return edit_distance_within(a, b, limit)
+
+
+def fuzzy_reference_pass(
+    bank: Sequence[Entry], ledger: Sequence[Entry], config: MatchConfig
+) -> PassResult:
+    """Pair references a few edits apart, with equal amounts and dates within the window.
+
+    Every candidate pair is scored (edits, then days apart, then rows) and the best pairs are
+    taken first, so the result does not depend on which entry happens to be looked at first.
+    """
+    window = dt.timedelta(days=config.date_window_days)
+    by_amount = group_by(
+        sorted((e for e in ledger if e.reference), key=lambda e: (e.date, e.row)),
+        lambda e: e.amount,
+    )
+    dates = {amount: [entry.date for entry in group] for amount, group in by_amount.items()}
+    scored: list[tuple[int, int, int, int, Entry, Entry]] = []
+    for entry in bank:
+        group = by_amount.get(entry.amount) if entry.reference else None
+        if not group:
+            continue
+        low = bisect_left(dates[entry.amount], entry.date - window)
+        high = bisect_right(dates[entry.amount], entry.date + window)
+        if high - low > MAX_FUZZY_CANDIDATES:
+            continue
+        for other in group[low:high]:
+            edits = reference_distance(entry.reference, other.reference, config.max_edits)
+            if edits is not None:
+                scored.append((edits, days_apart(entry, other), entry.row, other.row, entry, other))
+    scored.sort(key=lambda candidate: candidate[:4])
+    taken_bank: set[int] = set()
+    taken_ledger: set[int] = set()
+    pairs: list[Pair] = []
+    for *_, bank_entry, ledger_entry in scored:
+        if bank_entry.id not in taken_bank and ledger_entry.id not in taken_ledger:
+            taken_bank.add(bank_entry.id)
+            taken_ledger.add(ledger_entry.id)
+            pairs.append((bank_entry, ledger_entry))
+    return _result(bank, ledger, pairs)
 
 
 def amount_date_row(entry: Entry) -> tuple[Decimal, dt.date, int]:
@@ -162,7 +280,7 @@ def only_candidates(
 def amount_date_pass(
     bank: Sequence[Entry], ledger: Sequence[Entry], window_days: int
 ) -> PassResult:
-    """Pass 2: pair a bank and a ledger entry that are each other's only candidate.
+    """Pair a bank and a ledger entry that are each other's only candidate.
 
     Being a candidate is symmetric, so no other entry counted either of a pair among its own
     candidates: pairing them changes nobody else's count, and one walk finds every such pair.
@@ -177,51 +295,4 @@ def amount_date_pass(
         for i, j in enumerate(bank_choice)
         if j is not None and ledger_choice[j] == i
     ]
-    return PassResult(
-        tuple(pairs),
-        without(bank, (pair[0] for pair in pairs)),
-        without(ledger, (pair[1] for pair in pairs)),
-    )
-
-
-def reference_distance(a: str, b: str, max_edits: int) -> int | None:
-    """Edits between two references, if they are close enough to be the same payment.
-
-    At most `max_edits`, and at most one edit per five characters of the longer reference, so
-    short references must match exactly: "AB12" and "AB13" are different payments.
-    """
-    limit = min(max_edits, max(len(a), len(b)) // 5)
-    return edit_distance_within(a, b, limit)
-
-
-def _nearest_reference(entry: Entry, candidates: list[Entry], config: MatchConfig) -> int | None:
-    """Index of the candidate with the closest reference, then the closest date, or None."""
-    best: tuple[int, int, int] | None = None
-    for index, candidate in enumerate(candidates):
-        gap = days_apart(entry, candidate)
-        if gap > config.date_window_days:
-            continue
-        edits = reference_distance(entry.reference, candidate.reference, config.max_edits)
-        if edits is not None and (best is None or (edits, gap) < best[:2]):
-            best = (edits, gap, index)
-    return None if best is None else best[2]
-
-
-def fuzzy_reference_pass(
-    bank: Sequence[Entry], ledger: Sequence[Entry], config: MatchConfig
-) -> PassResult:
-    """Pass 3: pair references a few edits apart, with equal amounts and dates in the window."""
-    by_amount = group_by((e for e in ledger if e.reference), lambda e: e.amount)
-    pairs: list[Pair] = []
-    for entry in bank:
-        candidates = by_amount.get(entry.amount) if entry.reference else None
-        if not candidates:
-            continue
-        index = _nearest_reference(entry, candidates, config)
-        if index is not None:
-            pairs.append((entry, candidates.pop(index)))
-    return PassResult(
-        tuple(pairs),
-        without(bank, (pair[0] for pair in pairs)),
-        without(ledger, (pair[1] for pair in pairs)),
-    )
+    return _result(bank, ledger, pairs)

@@ -4,6 +4,7 @@ Dates are days in October 2026 (see tests/entries.py). The default window is 3 d
 """
 
 import datetime as dt
+import time
 from decimal import Decimal
 
 import pytest
@@ -37,7 +38,7 @@ def kinds(result: Reconciliation) -> list[tuple[BreakType, int | None, int | Non
     ]
 
 
-# Pass 1: exact reference
+# Exact reference (pass 1)
 
 
 def test_the_same_reference_and_amount_match_even_weeks_apart() -> None:
@@ -91,7 +92,32 @@ def test_a_reused_reference_pairs_each_entry_with_the_nearest_date() -> None:
     assert matched(result) == [(1, 2, Rule.EXACT_REFERENCE), (2, 1, Rule.EXACT_REFERENCE)]
 
 
-# Pass 2: amount and date window
+def test_a_reused_reference_pairs_the_nearest_dates_not_the_first_row() -> None:
+    # Rent paid on days 1, 31 and 61, booked once on day 61: the day-61 payment is the match.
+    result = reconcile(
+        [
+            bank(1, "1000.00", 1, "RENT"),
+            bank(2, "1000.00", 31, "RENT"),
+            bank(3, "1000.00", 61, "RENT"),
+        ],
+        [ledger(1, "1000.00", 61, "RENT")],
+    )
+
+    assert matched(result) == [(3, 1, Rule.EXACT_REFERENCE)]
+    assert kinds(result) == [
+        (BreakType.MISSING_IN_LEDGER, 1, None),
+        (BreakType.MISSING_IN_LEDGER, 2, None),
+    ]
+
+
+def test_an_amount_mismatch_says_when_the_bank_is_higher() -> None:
+    result = reconcile([bank(1, "5010.00", 2, "INV1001")], [ledger(1, "5000.00", 1, "INV1001")])
+
+    assert result.breaks[0].difference == Decimal("10.00")
+    assert result.breaks[0].reason.endswith("the bank is 10.00 higher.")
+
+
+# Amount and date window (pass 2, run last)
 
 
 def test_an_entry_without_a_reference_matches_on_amount_and_date() -> None:
@@ -200,7 +226,7 @@ def test_only_candidates_counts_unreferenced_entries_for_a_referenced_one() -> N
     assert [None if index is None else others[index].row for index in choices] == [None, None, 5]
 
 
-# Pass 3: fuzzy reference
+# Fuzzy reference (pass 3, run before pass 2)
 
 
 def test_a_swapped_pair_of_digits_is_a_fuzzy_match() -> None:
@@ -241,6 +267,8 @@ def test_short_references_must_match_exactly() -> None:
         ("UTR4512", "UTR4521", 1),  # 7 characters: one edit
         ("UTR4512", "UTR5421", None),  # ... and no more
         ("INV20261047", "INV20261740", 2),  # 11 characters: two edits
+        ("INV1001", "INV10012", 1),  # the shorter reference sets the limit: 7 characters
+        ("ABCD", "ABCDE", None),  # ... and a 4-character one allows no edit at all
     ],
 )
 def test_references_may_differ_by_one_edit_per_five_characters(
@@ -257,6 +285,28 @@ def test_the_closest_reference_wins() -> None:
 
     assert matched(result) == [(1, 2, Rule.FUZZY_REFERENCE)]
     assert kinds(result) == [(BreakType.MISSING_IN_BANK, None, 1)]
+
+
+@pytest.mark.parametrize("bank_rows", [(1, 2), (2, 1)])
+def test_fuzzy_pairs_take_the_fewest_edits_first_whatever_the_file_order(
+    bank_rows: tuple[int, int],
+) -> None:
+    references = {1: "INV20261075", 2: "INV20261794"}
+    result = reconcile(
+        [bank(row, "640.00", 2, references[row]) for row in bank_rows],
+        [ledger(1, "640.00", 2, "INV20261074"), ledger(2, "640.00", 2, "INV20261000")],
+    )
+
+    # 1075 is one edit from 1074, so that pair wins over two two-edit pairs.
+    assert matched(result) == [(1, 1, Rule.FUZZY_REFERENCE)]
+
+
+def test_the_edit_limit_comes_from_the_config() -> None:
+    bank_entries = [bank(1, "18250.00", 3, "INV20261047")]
+    ledger_entries = [ledger(1, "18250.00", 2, "INV20261740")]  # two edits apart
+
+    assert reconcile(bank_entries, ledger_entries).matches != ()
+    assert reconcile(bank_entries, ledger_entries, MatchConfig(max_edits=1)).matches == ()
 
 
 # Breaks left after the passes
@@ -294,6 +344,14 @@ def test_copies_on_both_sides_are_two_payments_not_duplicates() -> None:
 
     assert matched(result) == [(1, 1, Rule.EXACT_REFERENCE), (2, 2, Rule.EXACT_REFERENCE)]
     assert result.breaks == ()
+
+
+def test_a_copy_with_another_description_is_not_a_duplicate() -> None:
+    result = reconcile(
+        [], [ledger(1, "640.00", 3, "RCPT9001", "Rent"), ledger(2, "640.00", 3, "RCPT9001", "Fees")]
+    )
+
+    assert [item.type for item in result.breaks] == [BreakType.MISSING_IN_BANK] * 2
 
 
 def test_a_copy_that_differs_in_any_field_is_not_a_duplicate() -> None:
@@ -340,7 +398,35 @@ def test_the_match_rate_of_nothing_is_zero() -> None:
     assert reconcile([], []).match_rate == 0.0
 
 
-@pytest.mark.parametrize("field", ["date_window_days", "max_edits"])
-def test_the_config_refuses_negative_values(field: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("date_window_days", -1), ("date_window_days", 366), ("max_edits", -1), ("max_edits", 6)],
+)
+def test_the_config_refuses_values_out_of_range(field: str, value: int) -> None:
     with pytest.raises(ValueError, match=field):
-        MatchConfig(**{field: -1})
+        MatchConfig(**{field: value})
+
+
+def test_entries_on_one_side_need_their_own_ids() -> None:
+    twin = bank(1, "10.00", 1)
+
+    with pytest.raises(ValueError, match="every bank entry needs its own id"):
+        reconcile([twin, twin], [])
+
+
+def test_thousands_of_identical_keys_reconcile_quickly() -> None:
+    # A reused reference and thousands of same-day, same-amount lookalike references: inputs
+    # that make a careless matcher quadratic. 20,000 rows a side would take minutes that way.
+    size = 20_000
+    bank_entries = [bank(row, "500.00", 1 + row % 30, "RENT") for row in range(1, size + 1)]
+    ledger_entries = [ledger(row, "500.00", 1 + row % 30, "RENT") for row in range(1, size + 1)]
+    bank_lookalikes = [bank(size + row, "999.00", 5, f"UTR{row:08d}") for row in range(1, size + 1)]
+    ledger_lookalikes = [
+        ledger(size + row, "999.00", 5, f"INV{row:08d}") for row in range(1, size + 1)
+    ]
+
+    started = time.perf_counter()
+    result = reconcile(bank_entries + bank_lookalikes, ledger_entries + ledger_lookalikes)
+
+    assert time.perf_counter() - started < 5
+    assert len(result.matches) == size

@@ -1,5 +1,5 @@
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.domain.edit_distance import edit_distance_within
@@ -55,6 +55,7 @@ def test_a_negative_limit_is_refused() -> None:
         edit_distance_within("A", "B", -1)
 
 
+@settings(max_examples=1000)
 @given(st.text("AB01", max_size=9), st.text("AB01", max_size=9), st.integers(0, 4))
 def test_agrees_with_the_full_table_up_to_the_limit(a: str, b: str, limit: int) -> None:
     expected = full_table_distance(a, b)
