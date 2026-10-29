@@ -25,7 +25,16 @@ def check(condition: bool, message: str) -> None:
 
 def main() -> None:
     check(get(f"{API}/health") == {"status": "ok", "database": "ok"}, "API is not healthy")
-    print("OK: API and database are healthy")
+    runs = get(f"{API}/runs")
+    check(len(runs) >= 1, "the demo run was not seeded")
+    run = get(f"{API}/runs/{runs[-1]['id']}")
+    check(run["match_rate"] > 0.9, f"the demo match rate is only {run['match_rate']}")
+    queue = get(f"{API}/runs/{run['id']}/breaks?status=open&limit=5")
+    check(queue["total"] == run["open_breaks"] > 0, "the exception queue does not match the run")
+    print(
+        f"OK: API healthy; demo run {run['id']} matched {run['match_rate']:.2%} of "
+        f"{run['bank_count'] + run['ledger_count']:,} entries, {run['open_breaks']} breaks open"
+    )
 
 
 if __name__ == "__main__":

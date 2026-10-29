@@ -19,6 +19,8 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql+psycopg://reconx:reconx@db:5432/reconx
+      # Reconciles the sample files on first start (see README). Never set this in production.
+      SEED_DEMO_DATA: "true"
     ports:
       - "8000:8000"
     depends_on:
