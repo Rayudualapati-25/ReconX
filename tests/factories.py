@@ -8,8 +8,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.domain.breaks import BreakType
 from app.domain.entries import Side
-from app.models import EntryRow, Upload
+from app.models import BreakRow, EntryRow, Run, Upload
 
 _numbers = count(1)
 
@@ -43,3 +44,38 @@ def make_entry(session: Session, **overrides: Any) -> EntryRow:
     session.add(entry)
     session.flush()
     return entry
+
+
+def make_run(session: Session, **overrides: Any) -> Run:
+    values: dict[str, Any] = {
+        "date_window_days": 3,
+        "max_edits": 2,
+        "bank_count": 1,
+        "ledger_count": 1,
+        "matched_count": 0,
+        "duration_ms": 1,
+    } | overrides
+    if "bank_upload_id" not in values:
+        values["bank_upload_id"] = make_upload(session, kind=Side.BANK).id
+    if "ledger_upload_id" not in values:
+        values["ledger_upload_id"] = make_upload(session, kind=Side.LEDGER).id
+    run = Run(**values)
+    session.add(run)
+    session.flush()
+    return run
+
+
+def make_break(session: Session, **overrides: Any) -> BreakRow:
+    values: dict[str, Any] = {
+        "type": BreakType.MISSING_IN_LEDGER,
+        "amount": Decimal("100.00"),
+        "reason": "No unmatched ledger entry has reference INV1001.",
+    } | overrides
+    if "run_id" not in values:
+        values["run_id"] = make_run(session).id
+    if "bank_entry_id" not in values and "ledger_entry_id" not in values:
+        values["bank_entry_id"] = make_entry(session).id
+    item = BreakRow(**values)
+    session.add(item)
+    session.flush()
+    return item

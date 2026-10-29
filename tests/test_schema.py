@@ -15,11 +15,13 @@ from sqlalchemy import Engine, delete, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.domain.breaks import BreakType
 from app.domain.entries import Side
-from app.models import Base, EntryRow, Upload
-from tests.factories import make_entry, make_upload
+from app.domain.matching import Rule
+from app.models import Base, BreakRow, BreakStatus, EntryRow, MatchRow, Run, Upload
+from tests.factories import make_break, make_entry, make_run, make_upload
 
-EXPECTED_TABLES = {"uploads", "entries"}
+EXPECTED_TABLES = {"uploads", "entries", "runs", "matches", "breaks"}
 
 
 def test_migrations_create_the_expected_tables(engine: Engine) -> None:
@@ -90,3 +92,72 @@ def test_amounts_round_trip_exactly(db_session: Session) -> None:
     stored = db_session.scalar(select(EntryRow.amount).where(EntryRow.id == entry.id))
 
     assert stored == Decimal("-123456789012.34")
+
+
+@pytest.mark.parametrize(
+    ("kind", "sides"),
+    [
+        (BreakType.MISSING_IN_BANK, "bank"),  # a missing-in-bank break is about a ledger entry
+        (BreakType.MISSING_IN_LEDGER, "ledger"),
+        (BreakType.AMOUNT_MISMATCH, "bank"),  # a mismatch needs both entries
+        (BreakType.DUPLICATE, "both"),  # a duplicate is one entry
+    ],
+)
+def test_a_break_holds_exactly_the_entries_its_type_needs(
+    db_session: Session, kind: BreakType, sides: str
+) -> None:
+    entries = {}
+    if sides in ("bank", "both"):
+        entries["bank_entry_id"] = make_entry(db_session).id
+    if sides in ("ledger", "both"):
+        entries["ledger_entry_id"] = make_entry(db_session).id
+    difference = {"difference": Decimal("-15.00")} if kind is BreakType.AMOUNT_MISMATCH else {}
+
+    with pytest.raises(IntegrityError, match="ck_breaks_entries_fit_type"):
+        make_break(db_session, type=kind, **entries, **difference)
+
+
+def test_only_an_amount_mismatch_has_a_difference(db_session: Session) -> None:
+    with pytest.raises(IntegrityError, match="ck_breaks_difference_fits_type"):
+        make_break(db_session, difference=Decimal("1.00"))
+
+
+def test_a_resolved_break_has_a_note_and_a_time(db_session: Session) -> None:
+    with pytest.raises(IntegrityError, match="ck_breaks_resolution_fits_status"):
+        make_break(db_session, status=BreakStatus.RESOLVED)
+
+
+def test_a_break_puts_a_positive_amount_in_doubt(db_session: Session) -> None:
+    with pytest.raises(IntegrityError, match="ck_breaks_amount_positive"):
+        make_break(db_session, amount=Decimal("0.00"))
+
+
+def test_an_entry_is_matched_at_most_once_per_run(db_session: Session) -> None:
+    run = make_run(db_session)
+    bank_entry, ledger_entry = make_entry(db_session), make_entry(db_session)
+    rows = [
+        MatchRow(
+            run_id=run.id,
+            bank_entry_id=bank_entry.id,
+            ledger_entry_id=ledger_entry.id,
+            rule=Rule.EXACT_REFERENCE,
+        )
+        for _ in range(2)
+    ]
+    db_session.add_all(rows)
+
+    with pytest.raises(IntegrityError, match="uq_matches_run_id_bank_entry_id"):
+        db_session.flush()
+
+
+def test_a_run_matches_no_more_pairs_than_either_side_has(db_session: Session) -> None:
+    with pytest.raises(IntegrityError, match="ck_runs_matched_count_fits"):
+        make_run(db_session, bank_count=2, ledger_count=1, matched_count=2)
+
+
+def test_deleting_a_run_deletes_its_breaks(db_session: Session) -> None:
+    item = make_break(db_session)
+
+    db_session.execute(delete(Run).where(Run.id == item.run_id))
+
+    assert db_session.scalar(select(BreakRow.id).where(BreakRow.id == item.id)) is None

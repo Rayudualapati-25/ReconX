@@ -16,6 +16,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Identity,
+    Index,
     MetaData,
     Numeric,
     String,
@@ -23,9 +24,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.domain.breaks import BreakType
 from app.domain.entries import Side
+from app.domain.matching import Rule
 
 # Predictable names keep migrations reviewable and make constraint errors easy to trace.
 NAMING_CONVENTION = {
@@ -100,3 +103,106 @@ class EntryRow(Base):
     # The reference as written in the file, for people to search the original.
     raw_reference: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(Text)
+
+
+class BreakStatus(StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+
+
+class Run(Base):
+    """One reconciliation of a bank upload against a ledger upload, and its settings."""
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        CheckConstraint("date_window_days BETWEEN 0 AND 30", name="date_window_days_range"),
+        CheckConstraint("max_edits BETWEEN 0 AND 3", name="max_edits_range"),
+        CheckConstraint(
+            "bank_count >= 0 AND ledger_count >= 0 AND matched_count >= 0",
+            name="counts_not_negative",
+        ),
+        CheckConstraint(
+            "matched_count <= bank_count AND matched_count <= ledger_count",
+            name="matched_count_fits",
+        ),
+        CheckConstraint("duration_ms >= 0", name="duration_ms_not_negative"),
+    )
+
+    id: Mapped[IntPK]
+    bank_upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), index=True)
+    ledger_upload_id: Mapped[int] = mapped_column(ForeignKey("uploads.id"), index=True)
+    date_window_days: Mapped[int]
+    max_edits: Mapped[int]
+    bank_count: Mapped[int]
+    ledger_count: Mapped[int]
+    matched_count: Mapped[int]
+    # Time spent matching, without loading entries or writing results.
+    duration_ms: Mapped[int]
+    created_at: Mapped[CreatedAt] = mapped_column(index=True)
+
+    bank_upload: Mapped[Upload] = relationship(foreign_keys=[bank_upload_id], lazy="raise")
+    ledger_upload: Mapped[Upload] = relationship(foreign_keys=[ledger_upload_id], lazy="raise")
+
+
+class MatchRow(Base):
+    """A bank entry and a ledger entry that a run paired, and the rule that paired them."""
+
+    __tablename__ = "matches"
+    __table_args__ = (
+        UniqueConstraint("run_id", "bank_entry_id"),
+        UniqueConstraint("run_id", "ledger_entry_id"),
+        Index("ix_matches_run_id_rule", "run_id", "rule"),
+    )
+
+    id: Mapped[IntPK]
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    bank_entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"))
+    ledger_entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"))
+    rule: Mapped[Rule] = mapped_column(_enum(Rule, "match_rule"))
+
+
+class BreakRow(Base):
+    """Something a run could not match, why, and whether a person has resolved it."""
+
+    __tablename__ = "breaks"
+    __table_args__ = (
+        UniqueConstraint("run_id", "bank_entry_id"),
+        UniqueConstraint("run_id", "ledger_entry_id"),
+        CheckConstraint(
+            "CASE type"
+            " WHEN 'missing_in_bank' THEN bank_entry_id IS NULL AND ledger_entry_id IS NOT NULL"
+            " WHEN 'missing_in_ledger' THEN bank_entry_id IS NOT NULL AND ledger_entry_id IS NULL"
+            " WHEN 'amount_mismatch' THEN bank_entry_id IS NOT NULL AND ledger_entry_id IS NOT NULL"
+            " ELSE (bank_entry_id IS NULL) <> (ledger_entry_id IS NULL) END",
+            name="entries_fit_type",
+        ),
+        CheckConstraint(
+            "(type = 'amount_mismatch') = (difference IS NOT NULL)", name="difference_fits_type"
+        ),
+        CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint(
+            "(status = 'resolved') = (resolved_at IS NOT NULL AND resolution_note IS NOT NULL)",
+            name="resolution_fits_status",
+        ),
+        CheckConstraint(
+            "resolution_note IS NULL OR length(btrim(resolution_note)) > 0",
+            name="resolution_note_not_blank",
+        ),
+        Index("ix_breaks_run_id_status_type", "run_id", "status", "type"),
+    )
+
+    id: Mapped[IntPK]
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    type: Mapped[BreakType] = mapped_column(_enum(BreakType, "break_type"))
+    bank_entry_id: Mapped[int | None] = mapped_column(ForeignKey("entries.id"))
+    ledger_entry_id: Mapped[int | None] = mapped_column(ForeignKey("entries.id"))
+    # The money at stake: the difference for a mismatch, else the entry's amount; positive.
+    amount: Mapped[Money]
+    # Bank minus ledger, for an amount mismatch only.
+    difference: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[BreakStatus] = mapped_column(
+        _enum(BreakStatus, "break_status"), server_default=BreakStatus.OPEN.value
+    )
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
