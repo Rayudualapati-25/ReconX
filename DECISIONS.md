@@ -4,6 +4,12 @@ One entry per decision: what was chosen, the main alternative, why, and what wou
 with hindsight. Entries are added in the pull request that makes the decision and revised
 when later work proves them right or wrong.
 
+Contents: [Service and tooling](#service-and-tooling) (D1–D7) · [Matching](#matching)
+(D8–D16) · [Ingest and storage](#ingest-and-storage) (D17–D22) ·
+[Runs and review](#runs-and-review) (D23–D27) ·
+[Benchmark and demo data](#benchmark-and-demo-data) (D28–D31) · [Dashboard](#dashboard)
+(D32–D35)
+
 ## Service and tooling
 
 ### D1. Synchronous SQLAlchemy 2 behind FastAPI
