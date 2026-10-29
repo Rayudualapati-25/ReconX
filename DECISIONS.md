@@ -353,3 +353,57 @@ when later work proves them right or wrong.
   thousands of rows, not millions.
 - **With hindsight.** Offset pages shift when breaks are resolved mid-way; keyset paging on
   `(amount, id)` would fix that.
+
+## Benchmark and demo data
+
+### D28. The baseline applies the same rules with nested loops
+
+- **Decision.** `naive_reconcile` runs the same passes in the same order, but each pass
+  compares every remaining bank entry with every remaining ledger entry, taking each bank
+  entry's best candidate in file order: O(n × m), with no hash maps, sorting or bisection. It
+  reuses the engine's break explanations, which are not what is being compared. A test checks
+  that both find the same matches and breaks on the demo data, and the benchmark checks it
+  again at every size.
+- **Alternative.** A deliberately crude baseline (exact references only), or an O(n²) time
+  extrapolated from a small run.
+- **Why.** A speed-up means something only if both sides give the same answers; a crude
+  baseline would compare features, not algorithms. Running the baseline at 100,000 rows
+  reports a measured time, not a projection.
+- **With hindsight.** No change so far.
+
+### D29. Demo data is synthetic, with the answers planted
+
+- **Decision.** `app/demo.py` invents both files from a seeded random generator, with
+  fictional counterparties ("Acme Traders", "Globex Supplies"). Each transaction gets a
+  scenario: 84% clean, 4% reference missing on one side, 3% a typo, 2% bank charges taken off,
+  3% ledger only, 3% bank only, 1% loaded twice. The generator keeps what every row really is,
+  and never writes it to the CSVs. 15% of amounts are round figures that recur, as rent and
+  retainers do. Only `random()` is drawn, the one sequence Python keeps stable across
+  versions, and a test checks that the committed samples are exactly its output.
+- **Alternative.** Anonymised real statements, or hand-written fixtures.
+- **Why.** Real statements carry personal and financial data, which has no place in a public
+  repository. Planted answers turn a match rate into precision and recall, which is how the
+  greedy amount pass was caught (D11).
+- **With hindsight.** The scenario mix is a guess at a typical business. Real books would
+  show which breaks dominate, and cases the generator leaves out: partial payments, and one
+  payment settling several invoices.
+
+### D30. The demo seed uploads the committed samples through the real code
+
+- **Decision.** `python -m app.cli seed --if-empty` uploads `samples/bank_statement.csv` and
+  `samples/ledger.csv` with the same service as `POST /uploads` and reconciles them as
+  `POST /runs` does. Docker Compose runs it on first start (`SEED_DEMO_DATA=true`).
+- **Alternative.** SQL fixtures, or rows inserted directly.
+- **Why.** The seed is then one more end-to-end test of ingest and reconciliation, and anyone
+  can upload the same two files again from the dashboard; they are deduplicated (D20).
+- **With hindsight.** No change so far.
+
+### D31. The benchmark times matching only, on in-memory entries
+
+- **Decision.** `scripts/benchmark.py` times `reconcile` (best of three) and `naive_reconcile`
+  (one run) on the same entries. CSV parsing and the database are left out; COPY was measured
+  on its own (D21). The output records the Python version and machine.
+- **Alternative.** Time whole API requests.
+- **Why.** The claim under test is algorithmic, O(n) and O(n log n) against O(n²); reading
+  files and writing rows add roughly the same cost to both.
+- **With hindsight.** No change so far.

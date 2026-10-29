@@ -26,6 +26,7 @@ WORKDIR /app
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts/start.sh ./scripts/start.sh
+COPY samples ./samples
 COPY app ./app
 
 RUN useradd --system --uid 10001 reconx
