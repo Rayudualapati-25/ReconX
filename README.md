@@ -27,7 +27,7 @@ In progress. This README is the build plan; items are ticked as they land.
       amount mismatch, duplicate
 - [x] REST API: upload both files, run a reconciliation, list and resolve
       breaks
-- [ ] React + TypeScript dashboard: match rate, breaks by type, exception
+- [x] React + TypeScript dashboard: match rate, breaks by type, exception
       queue with manual resolve
 - [x] Benchmark against a naive O(n²) matcher on 100k rows, with the numbers
       in this README
@@ -35,6 +35,28 @@ In progress. This README is the build plan; items are ticked as they land.
       dashboard), GitHub Actions CI on every push
 - [ ] `DECISIONS.md`: each design choice, the alternative considered, and what
       would change with hindsight
+
+## Quick start
+
+```bash
+docker compose up --build
+```
+
+| Service | URL |
+|---|---|
+| Dashboard | <http://localhost:3000> |
+| API and interactive docs | <http://localhost:8000/docs> |
+
+![The dashboard: match rate, open breaks by type with the money in doubt, matches by rule, and the exception queue](docs/dashboard.jpg)
+
+On first start the API container migrates the database, uploads the two sample files in
+[`samples/`](samples) through the same code as `POST /uploads`, and reconciles them, so the
+dashboard opens on a finished run: the match rate, open breaks by type with the money in
+doubt, matches by rule, and the exception queue. Pick a break type to filter the queue, and
+**Resolve** a break with a note. **New reconciliation** uploads two other CSV files.
+
+The sample files are synthetic (DECISIONS D29): fictional counterparties, invented references
+and amounts, nothing real. `python3 scripts/smoke_test.py` checks a running stack end to end.
 
 ## Benchmark
 
@@ -75,7 +97,14 @@ docker run -d --name reconx-test-db -p 5432:5432 \
   -e POSTGRES_DB=reconx_test postgres:16-alpine
 uv run pytest --cov                       # tests with branch coverage (80% floor)
 uv run ruff check . && uv run ruff format --check . && uv run mypy
-docker compose up --build                 # the API on http://localhost:8000
+```
+
+The dashboard needs Node 22:
+
+```bash
+cd dashboard && npm ci
+npm run dev                               # http://localhost:5173, /api forwarded to :8000
+npm test && npm run lint && npm run build
 ```
 
 The tests use `TEST_DATABASE_URL` (see `.env.example`) and default to the container above.
