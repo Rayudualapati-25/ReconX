@@ -11,7 +11,23 @@ dashboard, test-first.
 
 ## Status
 
-In progress. This README is the build plan; items are ticked as they land.
+MVP complete: every item below is built, tested and running in CI. Measured on this
+repository:
+
+| Measure | Value |
+|---|---|
+| Matching 102,347 bank rows against 102,386 ledger rows | 1.11 s, 184,458 rows/s |
+| Naive O(n²) matcher on the same rows | 389 s, 526 rows/s: the engine is 351× faster, same matches |
+| Match rate on the seeded data | 94.30% (4,601 pairs from 4,862 bank and 4,896 ledger entries) |
+| Precision on the seeded data | 100.00%: no wrong automatic match |
+| Recall on the seeded data | 99.61% of the true pairs matched |
+| Tests | 176 for the API (99.5% branch coverage), 15 for the dashboard |
+| Endpoints | 8 |
+| Tables | 5 |
+
+The demo data is synthetic with the true pairs planted (DECISIONS D29), which is what makes
+precision and recall measurable. A test checks the seeded figures, endpoints and tables
+against the code, so they cannot drift.
 
 ## MVP scope
 
@@ -31,10 +47,72 @@ In progress. This README is the build plan; items are ticked as they land.
       queue with manual resolve
 - [x] Benchmark against a naive O(n²) matcher on 100k rows, with the numbers
       in this README
-- [ ] pytest suite with coverage (target 80%+), Docker Compose (API, Postgres,
+- [x] pytest suite with coverage (target 80%+), Docker Compose (API, Postgres,
       dashboard), GitHub Actions CI on every push
-- [ ] `DECISIONS.md`: each design choice, the alternative considered, and what
+- [x] `DECISIONS.md`: each design choice, the alternative considered, and what
       would change with hindsight
+
+## How it works
+
+```
+bank.csv ─┐                       ┌─ exact reference ──┐
+          ├─ ingest ─ PostgreSQL ─┤  fuzzy reference   ├─ matches + breaks ─ API ─ dashboard
+ledger.csv┘  (Decimal, day-first, └─ amount and date ──┘   (with reasons)
+              normalised refs)        each pass sees only the leftovers
+```
+
+1. **Ingest.** pandas reads both CSVs as text, so amounts go straight to `Decimal`; dates are
+   read day first; references are upper-cased and stripped to letters and digits. A file with
+   any bad row is refused with every problem listed, and the same file is stored once.
+2. **Exact reference**, O(n). Hash maps by reference: the same reference and amount is a
+   match; the same reference with another amount is an *amount mismatch*. Within a reference
+   that repeats (rent, a subscription), the nearest dates pair first.
+3. **Fuzzy reference**, on the leftovers only. References at most two edits apart (a swapped
+   digit pair counts once; short references must match exactly), with the same amount and
+   dates within 3 days. The best pairs go first.
+4. **Amount and date**, O(n log n). Both sides sorted by (amount, date) and walked with two
+   pointers. An entry with no reference pairs with the one entry on the other side that has
+   the same amount within the window, and only if that entry has no other candidate either.
+   Several equal amounts in a week are a guess, so they are left for a person.
+5. **Breaks.** Everything left is *missing in bank*, *missing in ledger* or a *duplicate* (an
+   exact repeat on one side), each with a reason a reviewer can act on, such as "Ledger rows
+   12, 40 have the same amount within 3 days, but more than one entry could pair, so none was
+   paired automatically."
+
+Every match records the rule that made it. Two different references never pair on amount
+alone: a wrong automatic match hides a real break, which costs more than an extra exception
+(DECISIONS D10, D11).
+
+## API
+
+| Method | Path | What |
+|---|---|---|
+| GET | `/health` | API and database health |
+| POST | `/uploads/{bank\|ledger}` | upload a CSV; 201, or 200 if the same file was uploaded before; 422 lists every bad row |
+| GET | `/uploads` | uploaded files, newest first |
+| POST | `/runs` | reconcile a bank upload against a ledger upload (`date_window_days`, `max_edits`) |
+| GET | `/runs` | runs, newest first |
+| GET | `/runs/{id}` | match rate, matches by rule, open and resolved breaks by type, money in doubt |
+| GET | `/runs/{id}/breaks` | the exception queue: `?type=&status=&limit=&offset=`, largest amount first |
+| POST | `/breaks/{id}/resolve` | resolve with a note; 409 if already resolved |
+
+Errors share one shape, `{"detail": "...", "code": "...", "errors": [...]}`. Money is sent as
+strings (`"5000.00"`). The full schema is at `/docs` on a running stack.
+
+## Input files
+
+CSV, UTF-8, one header row. Columns are found by common names, case and punctuation ignored:
+
+| Field | Header names accepted |
+|---|---|
+| Date (required) | `date`, `txn date`, `transaction date`, `posting date`, `value date`, … |
+| Amount (required) | `amount`, or a `debit` / `withdrawal` column with a `credit` / `deposit` column |
+| Reference | `reference`, `ref no.`, `utr`, `cheque no.`, `ref no./cheque no.`, … |
+| Description | `description`, `narration`, `particulars`, `memo`, `remarks`, … |
+
+Dates are day first (`01/10/2026` is 1 October); amounts may use Indian or Western digit
+grouping, a ₹, INR or Rs prefix, and `-`, `(…)` or `Dr` for money out. Money in is positive on
+both files.
 
 ## Quick start
 
@@ -83,8 +161,8 @@ migrated database) to reproduce it.
 
 ## Stack
 
-Python 3.11+ · FastAPI · PostgreSQL 16 · SQLAlchemy 2 · pandas · React ·
-TypeScript · pytest · Docker Compose · GitHub Actions
+Python 3.11+ · FastAPI · PostgreSQL 16 · SQLAlchemy 2 · Alembic · pandas · Pydantic v2 ·
+React 19 · TypeScript · Vite · pytest · Hypothesis · Vitest · Docker Compose · GitHub Actions
 
 ## Development
 
@@ -108,11 +186,29 @@ npm test && npm run lint && npm run build
 ```
 
 The tests use `TEST_DATABASE_URL` (see `.env.example`) and default to the container above.
-Design choices and their trade-offs are recorded in [DECISIONS.md](DECISIONS.md).
+
+```
+app/
+  domain/      the engine: pure functions over immutable entries (passes, breaks, naive baseline)
+  ingest.py    CSV to normalised rows with pandas, or every problem by row
+  services/    uploads and runs: one function per use case, one transaction each
+  routers/     HTTP endpoints
+  models.py    SQLAlchemy tables; migrations/ holds the Alembic versions
+  demo.py      synthetic statements with planted answers
+  cli.py       operator commands: seed, write-samples
+dashboard/     React + TypeScript single page, served by nginx
+samples/       the synthetic demo statement and ledger
+scripts/       container start-up, the smoke test and the benchmark
+tests/         pytest: unit, property-based, API, schema and migration tests
+```
+
+Design choices and their trade-offs, including the ones that changed after measurement or
+review, are recorded in [DECISIONS.md](DECISIONS.md) (D1–D35).
 
 ## Done when
 
-- `docker compose up` starts the API, the database and the dashboard
-- CI is green on every push
-- This README reports measured numbers: rows matched per second against the
-  O(n²) baseline, match rate on the seeded data, tests and coverage
+- [x] `docker compose up` starts the API, the database and the dashboard (checked by CI on every
+      push)
+- [x] CI is green on every push
+- [x] This README reports measured numbers: rows matched per second against the O(n²)
+      baseline, match rate on the seeded data, tests and coverage
