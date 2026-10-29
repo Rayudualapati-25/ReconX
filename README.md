@@ -25,7 +25,7 @@ In progress. This README is the build plan; items are ticked as they land.
       shared amount, see DECISIONS D10)
 - [x] Break types with a reason for each: missing in bank, missing in ledger,
       amount mismatch, duplicate
-- [ ] REST API: upload both files, run a reconciliation, list and resolve
+- [x] REST API: upload both files, run a reconciliation, list and resolve
       breaks
 - [ ] React + TypeScript dashboard: match rate, breaks by type, exception
       queue with manual resolve

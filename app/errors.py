@@ -27,3 +27,28 @@ class InvalidFile(DomainError):
 class FileTooLarge(DomainError):
     status_code = 413
     code = "file_too_large"
+
+
+class UploadNotFound(DomainError):
+    status_code = 404
+    code = "upload_not_found"
+
+
+class WrongUploadKind(DomainError):
+    status_code = 422
+    code = "wrong_upload_kind"
+
+
+class RunNotFound(DomainError):
+    status_code = 404
+    code = "run_not_found"
+
+
+class BreakNotFound(DomainError):
+    status_code = 404
+    code = "break_not_found"
+
+
+class BreakAlreadyResolved(DomainError):
+    status_code = 409
+    code = "break_already_resolved"

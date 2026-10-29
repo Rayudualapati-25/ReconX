@@ -293,3 +293,63 @@ when later work proves them right or wrong.
 - **Why.** "INV/2026-0042" and "inv 2026 0042" must compare equal, but a reviewer searches the
   original statement for what it actually printed.
 - **With hindsight.** No change so far.
+
+## Runs and review
+
+### D23. A run is computed in the request and stored in full
+
+- **Decision.** `POST /runs` loads both uploads, reconciles them in memory, writes every match
+  and break with COPY, and returns the summary in the same request. Runs never change; running
+  the same uploads with other settings makes a new run.
+- **Alternative.** A job queue (Celery or RQ) with a status endpoint to poll, or matching on
+  the fly whenever results are read.
+- **Why.** Matching 100,000 rows a side takes about a second, so a queue would add a broker, a
+  worker and a status machine with nothing to show for them. Stored results make the
+  exception queue a cheap indexed query, and keep a record of what each run decided.
+- **With hindsight.** No change so far. Past a few million rows, or with many uploads at once,
+  the run would move to a worker and the request would return its id.
+
+### D24. Resolving a break is one conditional UPDATE
+
+- **Decision.** `POST /breaks/{id}/resolve` runs `UPDATE … WHERE id = :id AND status = 'open'
+  RETURNING id`. No row back means 404 (no such break) or 409 (already resolved). A note is
+  required, and a CHECK constraint makes every resolved break carry a note and a time.
+- **Alternative.** Load the break, check its status in Python, then save it, which needs a
+  row lock to be safe; or optimistic version numbers.
+- **Why.** The check and the change happen in one statement, so two reviewers resolving the
+  same break at once cannot both succeed, and no lock is held while anyone thinks.
+- **With hindsight.** No change so far. A real team would record who resolved each break
+  (which needs sign-in) and a category (bank charges, timing difference, posting error) to
+  report on.
+
+### D25. A break stores the money it puts in doubt
+
+- **Decision.** Each break stores `amount`: the difference for an amount mismatch, otherwise
+  the entry's amount, always positive. The summary sums the open amounts by type, and the
+  exception queue lists the largest first.
+- **Alternative.** Work it out at read time by joining the entries.
+- **Why.** Reviewers clear the biggest problems first, and "₹15,364.00 to review" says more
+  than "4 breaks". Stored, it keeps the summary to one GROUP BY over one table.
+- **With hindsight.** No change so far.
+
+### D26. Summaries are counted live, not kept as counters
+
+- **Decision.** Matches by rule and open and resolved breaks by type are `GROUP BY` queries
+  with `FILTER`, run on every `GET /runs/{id}`. The run row stores only what never changes:
+  the settings, entry counts, matched count and matching time.
+- **Alternative.** Counters on the run row, updated whenever a break is resolved.
+- **Why.** Counters drift as soon as one write path forgets them. The queries use the
+  `(run_id, status, type)` index and stay fast at thousands of breaks.
+- **With hindsight.** No change so far.
+
+### D27. The exception queue pages by limit and offset and returns the total
+
+- **Decision.** `GET /runs/{id}/breaks?type=&status=&limit=&offset=` returns
+  `{items, total, limit, offset}`, each break with both of its entries joined in the same
+  query. The run's relationships raise on lazy loading, so an N+1 query fails a test instead
+  of slowing a page.
+- **Alternative.** Keyset (cursor) pagination.
+- **Why.** The dashboard shows "26–50 of 460" and moves a page at a time; queues hold
+  thousands of rows, not millions.
+- **With hindsight.** Offset pages shift when breaks are resolved mid-way; keyset paging on
+  `(amount, id)` would fix that.
