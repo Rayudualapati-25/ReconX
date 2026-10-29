@@ -1,4 +1,5 @@
-# Local stack: the API on http://localhost:8000 and PostgreSQL 16.
+# Local stack: the dashboard on http://localhost:3000, the API on http://localhost:8000 and
+# PostgreSQL 16.
 # The credentials below are for local development only.
 services:
   db:
@@ -32,6 +33,19 @@ services:
         - python
         - -c
         - import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ && wget -q -O /dev/null http://127.0.0.1/api/health"]
       interval: 5s
       timeout: 5s
       retries: 20

@@ -407,3 +407,51 @@ when later work proves them right or wrong.
 - **Why.** The claim under test is algorithmic, O(n) and O(n log n) against O(n²); reading
   files and writing rows add roughly the same cost to both.
 - **With hindsight.** No change so far.
+
+## Dashboard
+
+### D32. One page, with no UI or chart library
+
+- **Decision.** React 19 and TypeScript, built with Vite. Plain CSS with custom properties,
+  light or dark following the system setting; the charts are CSS bars. No component library,
+  chart library or state manager: 72 KB of JavaScript, gzipped.
+- **Alternative.** A component library such as Material UI, a chart library such as
+  Recharts, and a data-fetching library such as TanStack Query.
+- **Why.** The page is five tiles, two bar lists and a table, which a library would outweigh.
+  Fewer dependencies mean fewer upgrades and a smaller download, and the fetching is three
+  effects that ignore stale responses.
+- **With hindsight.** More screens (drilling into matches, comparing runs) would justify
+  TanStack Query for caching and refetching.
+
+### D33. The dashboard reaches the API through its own origin
+
+- **Decision.** The browser calls `/api/…`. nginx in the Compose stack, and Vite's dev server
+  locally, forward it to the API without the prefix.
+- **Alternative.** Call the API's own origin and enable CORS in FastAPI.
+- **Why.** One origin means no CORS rules to get wrong, and the same build works wherever the
+  proxy runs. nginx also caps request size before an oversized upload reaches the API.
+- **With hindsight.** No change so far.
+
+### D34. Money stays a string in the browser too
+
+- **Decision.** The API sends amounts as strings, and the dashboard formats them by splitting
+  the digits (Indian grouping, `₹1,23,456.78`). It never parses an amount into a number or
+  adds amounts up; totals come from the API.
+- **Alternative.** `parseFloat` and `Intl.NumberFormat`.
+- **Why.** For the same reason as on the server (D17): a float cannot hold most amounts
+  exactly, and a total summed in JavaScript could disagree with the database's.
+- **With hindsight.** No change so far.
+
+### D35. Dashboard tests render the whole app against a fake API
+
+- **Decision.** Vitest and Testing Library render `<App>` with an injected `Api` whose methods
+  are stubs. Tests click and type as a reviewer would (pick a break type, resolve with a note,
+  upload a refused file) and check what is shown and what was called. The Compose smoke test
+  checks the real API behind the real proxy.
+- **Alternative.** Mock `fetch` globally, or snapshot-test components.
+- **Why.** An injected API keeps the tests independent of URLs and of how fetching works, and
+  testing behaviour rather than markup leaves the structure and CSS free to change.
+- **With hindsight.** Looking at the running page found two layout bugs that these tests
+  cannot see: a wide table stretching the whole grid, and a long run label pushing a phone
+  screen sideways. A browser test against the Compose stack, with Playwright, is the next
+  test to add.
