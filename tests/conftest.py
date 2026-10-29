@@ -1,21 +1,25 @@
 import os
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, make_url
+from sqlalchemy import Engine, make_url, text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import get_session, make_engine
 from app.main import create_app
 
-# Tests need a real PostgreSQL: constraints, NUMERIC money and bulk inserts are Postgres-specific.
+# Tests need a real PostgreSQL: constraints, NUMERIC money and COPY are Postgres-specific.
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+psycopg://reconx:reconx@localhost:5432/reconx_test",
 )
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def pytest_configure() -> None:
@@ -26,8 +30,20 @@ def pytest_configure() -> None:
 
 
 @pytest.fixture(scope="session")
-def engine() -> Iterator[Engine]:
+def alembic_config() -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL)
+    return config
+
+
+@pytest.fixture(scope="session")
+def engine(alembic_config: Config) -> Iterator[Engine]:
+    """Build the schema from an empty database with the real migrations, once per run."""
     engine = make_engine(TEST_DATABASE_URL)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    command.upgrade(alembic_config, "head")
     yield engine
     engine.dispose()
 

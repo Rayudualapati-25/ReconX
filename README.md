@@ -15,7 +15,7 @@ In progress. This README is the build plan; items are ticked as they land.
 
 ## MVP scope
 
-- [ ] CSV ingest for the bank statement and the ledger into PostgreSQL,
+- [x] CSV ingest for the bank statement and the ledger into PostgreSQL,
       normalising amounts (`Decimal`), dates and references
 - [x] Pass 1: exact reference match with a hash map, O(n)
 - [x] Pass 2: amount and date-window match with sorted two pointers,

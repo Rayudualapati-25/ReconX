@@ -223,3 +223,73 @@ when later work proves them right or wrong.
   is enough to pin an API worker.
 - **With hindsight.** No change so far.
 
+## Ingest and storage
+
+### D17. pandas reads every cell as text; amounts go straight to Decimal
+
+- **Decision.** `read_csv(dtype=str, keep_default_na=False)`. Each amount is parsed by a small
+  grammar (an optional ₹, INR or Rs prefix; Indian or Western digit grouping; `-`, `(…)` or
+  `Dr` for money out) into a `Decimal` with at most two places, stored as `NUMERIC(14, 2)`.
+- **Alternative.** Let pandas infer numeric columns as float64 and round afterwards.
+- **Why.** A float64 cannot hold most decimal amounts exactly, and two amounts that should be
+  equal can then compare unequal, which breaks matching. Text in, Decimal out keeps amounts
+  exact from the file to the database. `keep_default_na=False` also stops pandas turning a
+  reference such as `NA` or `NULL` into a missing value.
+- **With hindsight.** No change so far.
+
+### D18. A file with any bad row is refused whole, with every problem listed
+
+- **Decision.** Problems are collected row by row (date, amount, debit and credit, reference
+  length) and returned as a 422 listing up to 20 of them, such as "row 3: amount 'ten' is not a
+  number". Nothing is stored.
+- **Alternative.** Store the valid rows and report the others.
+- **Why.** A dropped row reappears later as a false "missing in bank" break, far from its
+  cause. Listing every problem lets the uploader fix the file in one go.
+- **With hindsight.** Exports that mix in non-transaction lines (page footers, running totals)
+  would be better served by an explicit option to skip them than by editing the file.
+
+### D19. Dates are read day first; columns are found by common header names
+
+- **Decision.** A fixed list of date formats is tried in order: ISO first, then `DD/MM/YYYY`
+  and its variants; a two-digit year is 20xx. Headers are matched loosely ("Txn Date",
+  "Ref No./Cheque No.", "Withdrawal Amt.") against alias lists, and separate debit and credit
+  columns become one signed amount.
+- **Alternative.** pandas' format inference with `dayfirst=True`, or a column mapping that the
+  uploader configures for each file.
+- **Why.** Indian statements write `01/02/2026` for 1 February, and inference can silently
+  flip day and month when a value could be either. Explicit formats fail loudly instead. The
+  alias lists cover the usual exports with no configuration.
+- **With hindsight.** A column mapping saved per bank account would handle unusual layouts
+  without a code change.
+
+### D20. The same file is stored once, by content hash
+
+- **Decision.** Each upload records the SHA-256 of its bytes, unique per kind. Uploading the
+  same bytes again returns the stored upload with 200 instead of 201. Two identical uploads at
+  the same moment are settled by `INSERT … ON CONFLICT DO NOTHING`; a test commits the same
+  file from a second connection in the middle of an upload and checks the outcome.
+- **Alternative.** Store every upload, or deduplicate individual rows.
+- **Why.** Loading the same statement twice is a classic source of false duplicates. Hashing
+  the bytes catches the exact case cheaply and without any judgement about rows.
+- **With hindsight.** A re-export of the same statement with one edit has different bytes and
+  is stored again. Detecting overlapping date ranges for the same account would catch it.
+
+### D21. Entries are written with COPY
+
+- **Decision.** Rows are streamed with PostgreSQL's `COPY … FROM STDIN` through psycopg 3,
+  inside the same transaction as the upload row.
+- **Alternative.** ORM objects, or SQLAlchemy's batched `INSERT … VALUES`.
+- **Why.** Measured on the development machine: 100,000 entries take 0.75 s with COPY against
+  2.2 s with batched INSERTs. Runs write as many matches and breaks again, so the saving
+  repeats. COPY still runs inside the transaction, so a failure leaves nothing behind.
+- **With hindsight.** No change so far.
+
+### D22. References are stored twice: normalised, and as written
+
+- **Decision.** `reference` (upper case, letters and digits only, enforced by a CHECK
+  constraint) is what matching compares; `raw_reference` is what the file said, and is what
+  reviewers see.
+- **Alternative.** Store only the normalised form.
+- **Why.** "INV/2026-0042" and "inv 2026 0042" must compare equal, but a reviewer searches the
+  original statement for what it actually printed.
+- **With hindsight.** No change so far.
