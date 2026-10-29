@@ -29,12 +29,35 @@ In progress. This README is the build plan; items are ticked as they land.
       breaks
 - [ ] React + TypeScript dashboard: match rate, breaks by type, exception
       queue with manual resolve
-- [ ] Benchmark against a naive O(n²) matcher on 100k rows, with the numbers
+- [x] Benchmark against a naive O(n²) matcher on 100k rows, with the numbers
       in this README
 - [ ] pytest suite with coverage (target 80%+), Docker Compose (API, Postgres,
       dashboard), GitHub Actions CI on every push
 - [ ] `DECISIONS.md`: each design choice, the alternative considered, and what
       would change with hindsight
+
+## Benchmark
+
+The engine against a naive matcher that applies the same rules with nested loops, comparing
+every bank entry with every ledger entry (DECISIONS D28). Both run on the same synthetic
+statements, whose true pairs are known (D29), so the table also reports precision and recall.
+Only matching is timed: no CSV parsing and no database (D31).
+
+| Bank rows | Ledger rows | Engine | Engine rows/s | Naive O(n²) | Naive rows/s | Speed-up | Same matches | Precision | Recall | Match rate |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1,036 | 1,054 | 0.003 s | 734,579 | 0.04 s | 51,656 | 14x | yes | 100.00% | 99.90% | 94.26% |
+| 10,254 | 10,283 | 0.041 s | 499,078 | 3.77 s | 5,448 | 92x | yes | 100.00% | 99.43% | 93.94% |
+| 102,347 | 102,386 | 1.110 s | 184,458 | 389.24 s | 526 | 351x | yes | 100.00% | 99.33% | 93.77% |
+
+Rows per second count both files. "Same matches" means the naive matcher found exactly the
+pairs the engine found. Measured with `uv run python scripts/benchmark.py` on an Apple silicon
+laptop (arm64, Python 3.12.16, one core). The naive run at 100,000 rows takes about six and a
+half minutes; pass `--naive-max 10000` for a quick run.
+
+End to end through the services behind the API, on a local PostgreSQL 16 container, the
+100,000-row files took 3.89 s to parse and store, then 4.70 s to reconcile and store the 95,988
+matches and every break, of which matching was 1.37 s. Pass `--database-url` (an empty,
+migrated database) to reproduce it.
 
 ## Stack
 
