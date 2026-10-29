@@ -1,7 +1,9 @@
-from collections.abc import Iterator
-from typing import Annotated
+from collections.abc import Iterable, Iterator, Sequence
+from typing import Annotated, Any
 
+import psycopg
 from fastapi import Depends, Request
+from psycopg import sql
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,3 +23,23 @@ def get_session(request: Request) -> Iterator[Session]:
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
+
+
+def copy_rows(
+    session: Session, table: str, columns: Sequence[str], rows: Iterable[Sequence[Any]]
+) -> None:
+    """Write many rows with PostgreSQL's COPY, inside the session's transaction.
+
+    COPY streams every row through one statement instead of one INSERT per batch: 100,000
+    entries take 0.75 s this way against 2.2 s with SQLAlchemy's batched INSERT (DECISIONS D21).
+    """
+    connection = session.connection().connection.driver_connection
+    if not isinstance(connection, psycopg.Connection):
+        raise TypeError("COPY needs a psycopg 3 connection")
+    statement = sql.SQL("COPY {table} ({columns}) FROM STDIN").format(
+        table=sql.Identifier(table),
+        columns=sql.SQL(", ").join(sql.Identifier(column) for column in columns),
+    )
+    with connection.cursor() as cursor, cursor.copy(statement) as copy:
+        for row in rows:
+            copy.write_row(row)

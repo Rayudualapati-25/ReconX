@@ -23,6 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=build /opt/venv /opt/venv
 
 WORKDIR /app
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY scripts/start.sh ./scripts/start.sh
 COPY app ./app
 
